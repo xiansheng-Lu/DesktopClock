@@ -4,6 +4,10 @@
 
 当前版本：**v1.6**
 
+![DesktopClock 运行效果](screenshot.jpg)
+
+*实机截图：暖金渐变的时/分 + 玫瑰粉渐变的秒（华文琥珀字体），左上角为街道级实时天气*
+
 ---
 
 ## ✨ 功能特性
@@ -110,6 +114,7 @@ TUN 模式接管全部网络流量，IP 定位会识别成代理节点的位置�
 | `DesktopClock.exe` | 编译产物 |
 | `clock.ico` | 程序图标（编译时嵌入 exe） |
 | `clock.png` / `clock.svg` | 图标源文件（留档） |
+| `screenshot.jpg` | 程序运行效果图（README 展示用） |
 | `settings.json` | 用户配置（自动生成/更新） |
 
 ---
