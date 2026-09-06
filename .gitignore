@@ -1,0 +1,12 @@
+# 构建产物
+DesktopClock.exe
+
+# 用户个人配置（含城市地址，不入库）
+settings.json
+
+# 工作区数据
+.workbuddy/
+
+# 临时文件
+*.log
+*.tmp
