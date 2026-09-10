@@ -322,6 +322,7 @@ namespace DesktopClock {
         public double Edge = 0.13;        // 高光描边强度
         public double Corner = 30;        // 圆角半径（像素，0=方角，150=半圆）
         public string City = "";           // 天气城市（留空 = 自动 IP 定位；支持中文如"北京"）
+        public bool ShowWeather = false;   // v1.8：是否显示天气（默认关闭，保持背景整洁）
         // ---- v1.7 背景图片 ----
         public string BgImage = "";        // 背景图片绝对路径（空 = 使用渐变背景）
         public string BgFit = "fill";      // 缩放模式: fill 填充裁剪 / fit 适应留边 / stretch 拉伸 / tile 平铺
@@ -349,6 +350,7 @@ namespace DesktopClock {
                 if (map.TryGetValue("edge", out v)) s.Edge = Num(v, s.Edge);
                 if (map.TryGetValue("corner", out v)) s.Corner = Num(v, s.Corner);
                 if (map.TryGetValue("city", out v)) s.City = v ?? "";
+                if (map.TryGetValue("showWeather", out v)) s.ShowWeather = Bool(v, s.ShowWeather);
                 // v1.7 背景图片
                 if (map.TryGetValue("bgImage", out v)) s.BgImage = v ?? "";
                 if (map.TryGetValue("bgFit", out v)) s.BgFit = NormFit(v);
@@ -399,6 +401,8 @@ namespace DesktopClock {
                 sb.Append("  \"corner\": ").Append(F(Corner)).Append(",\n");
                 sb.Append("  // 天气城市（留空 = 自动 IP 定位，可手动指定如 Beijing / Shanghai）\n");
                 sb.Append("  \"city\": \"").Append(Esc(City)).Append("\",\n");
+                sb.Append("  // 是否显示天气（false = 背景保持整洁；开启后每 10 分钟拉取一次）\n");
+                sb.Append("  \"showWeather\": ").Append(ShowWeather ? "true" : "false").Append(",\n");
                 sb.Append("  // v1.7 背景图片路径（留空 = 使用渐变背景；拖图片到窗口或右键菜单选择）\n");
                 sb.Append("  \"bgImage\": \"").Append(Esc(BgImage)).Append("\",\n");
                 sb.Append("  // 背景图缩放模式：fill 填充裁剪 / fit 适应留边 / stretch 拉伸 / tile 平铺\n");
@@ -521,6 +525,8 @@ namespace DesktopClock {
         Path edgePath;
         Settings cfg;
         MenuItem cityInfoItem;   // 右键菜单里的"天气城市"状态行（打开菜单时刷新文本）
+        MenuItem setCityItem, autoCityItem;          // 依赖天气开关的菜单项（关闭时置灰）
+        DispatcherTimer weatherTimer;                // 天气定时刷新（随开关启停）
         // v1.7 背景图片相关图层引用（用于运行时切换/调参）
         Rectangle bgImageRect;   // 图片层（ImageBrush 填充）
         Rectangle bgDimRect;     // 暗化遮罩层
@@ -560,12 +566,24 @@ namespace DesktopClock {
 
             WatchSettings();
 
-            // v1.5：天气。启动时拉一次，之后每 10 分钟刷新
+            // v1.8：天气默认关闭（保持背景整洁），右键菜单「显示天气」可开启。
+            // 关闭时完全不发网络请求，也不会显示天气文字。
             // city 留空 = 自动 IP 定位；填了则用指定城市（支持中文，如"北京"）
-            FetchWeather();
-            var weatherTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(10) };
+            weatherTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(10) };
             weatherTimer.Tick += delegate { FetchWeather(); };
-            weatherTimer.Start();
+            ApplyWeatherVisibility();
+            if (cfg.ShowWeather) FetchWeather();   // 开启时才拉首轮数据
+        }
+
+        // 依据 cfg.ShowWeather 统一控制：文字显隐 + 定时器启停 + 是否发起首轮请求
+        void ApplyWeatherVisibility() {
+            if (cfg.ShowWeather) {
+                weatherText.Visibility = Visibility.Visible;
+                weatherTimer.Start();
+            } else {
+                weatherText.Visibility = Visibility.Collapsed;
+                weatherTimer.Stop();
+            }
         }
 
         // 按当前 cfg.City 发起一次天气获取。
@@ -610,8 +628,11 @@ namespace DesktopClock {
             ApplyEdge();
             ApplySeconds();
             if (Topmost != cfg.Topmost) Topmost = cfg.Topmost;
-            // 城市配置变了 → 立即按新城市重新拉天气（无需重启）
-            if (old.City != fresh.City) FetchWeather();
+            // v1.8：天气开关 / 城市变了 → 同步显隐与定时器（无需重启）
+            if (old.ShowWeather != fresh.ShowWeather) ApplyWeatherVisibility();
+            if (cfg.ShowWeather && (old.City != fresh.City || old.ShowWeather != fresh.ShowWeather)) {
+                FetchWeather();
+            }
         }
 
         // ============================================================ 界面
@@ -1153,11 +1174,29 @@ namespace DesktopClock {
             };
 
             // ---- 天气城市：菜单直接改，不用手编 settings.json ----
+            // v1.8：天气总开关。关闭时不发任何网络请求，城市相关项一并置灰
+            var weatherToggleItem = new MenuItem {
+                Header = "显示天气",
+                IsCheckable = true,
+                IsChecked = cfg.ShowWeather,
+                StaysOpenOnClick = true
+            };
+            weatherToggleItem.Click += delegate {
+                cfg.ShowWeather = weatherToggleItem.IsChecked;
+                cfg.Save();
+                ApplyWeatherVisibility();
+                if (cfg.ShowWeather) {
+                    Weather.Loaded = false;      // 重新开启时先拉一轮
+                    weatherText.Text = "天气获取中...";
+                    FetchWeather();
+                }
+            };
+
             cityInfoItem = new MenuItem {
                 Header = "天气城市",
                 IsEnabled = false   // 纯状态行，不可点
             };
-            var setCityItem = new MenuItem { Header = "设置城市…" };
+            setCityItem = new MenuItem { Header = "设置城市…" };
             setCityItem.Click += delegate {
                 string result;
                 if (PromptCity(cfg.City, out result)) {
@@ -1167,7 +1206,7 @@ namespace DesktopClock {
                     FetchWeather();
                 }
             };
-            var autoCityItem = new MenuItem { Header = "自动定位 (IP)" };
+            autoCityItem = new MenuItem { Header = "自动定位 (IP)" };
             autoCityItem.Click += delegate {
                 if (cfg.City.Length == 0) return;
                 cfg.City = "";
@@ -1175,7 +1214,7 @@ namespace DesktopClock {
                 Weather.Loaded = false;
                 FetchWeather();
             };
-            // 每次打开菜单时刷新状态行（城市可能在对话框里刚改过）
+            // 每次打开菜单时刷新状态行（城市/背景图/开关可能在别处刚改过）
             cm.Opened += delegate {
                 cityInfoItem.Header = "天气城市: " +
                     (string.IsNullOrEmpty(cfg.City) ? "自动定位 (IP)" : cfg.City);
@@ -1185,6 +1224,10 @@ namespace DesktopClock {
                 if (bgName.Length > 22) bgName = bgName.Substring(0, 21) + "…";
                 bgInfoItem.Header = "背景图片: " + bgName;
                 RefreshFitChecks();
+                // 天气关闭时，城市相关项置灰（避免误点）
+                weatherToggleItem.IsChecked = cfg.ShowWeather;
+                setCityItem.IsEnabled = cfg.ShowWeather;
+                autoCityItem.IsEnabled = cfg.ShowWeather;
             };
 
             cm.Closed += delegate { cfg.Save(); };
@@ -1204,6 +1247,7 @@ namespace DesktopClock {
             cm.Items.Add(blurItem);
             cm.Items.Add(bgTipItem);
             cm.Items.Add(new Separator());
+            cm.Items.Add(weatherToggleItem);
             cm.Items.Add(cityInfoItem);
             cm.Items.Add(setCityItem);
             cm.Items.Add(autoCityItem);
