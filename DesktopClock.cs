@@ -322,6 +322,11 @@ namespace DesktopClock {
         public double Edge = 0.13;        // 高光描边强度
         public double Corner = 30;        // 圆角半径（像素，0=方角，150=半圆）
         public string City = "";           // 天气城市（留空 = 自动 IP 定位；支持中文如"北京"）
+        // ---- v1.7 背景图片 ----
+        public string BgImage = "";        // 背景图片绝对路径（空 = 使用渐变背景）
+        public string BgFit = "fill";      // 缩放模式: fill 填充裁剪 / fit 适应留边 / stretch 拉伸 / tile 平铺
+        public double BgDim = 0.30;        // 暗化遮罩强度 0~0.80（保证时间文字可读）
+        public double BgBlur = 0.0;        // 图片模糊半径 0~30（px）
         public bool Topmost = false;
         public bool Seconds = true;
         public double X = double.NaN;     // 窗口位置
@@ -344,6 +349,11 @@ namespace DesktopClock {
                 if (map.TryGetValue("edge", out v)) s.Edge = Num(v, s.Edge);
                 if (map.TryGetValue("corner", out v)) s.Corner = Num(v, s.Corner);
                 if (map.TryGetValue("city", out v)) s.City = v ?? "";
+                // v1.7 背景图片
+                if (map.TryGetValue("bgImage", out v)) s.BgImage = v ?? "";
+                if (map.TryGetValue("bgFit", out v)) s.BgFit = NormFit(v);
+                if (map.TryGetValue("bgDim", out v)) s.BgDim = Num(v, s.BgDim);
+                if (map.TryGetValue("bgBlur", out v)) s.BgBlur = Num(v, s.BgBlur);
                 if (map.TryGetValue("topmost", out v)) s.Topmost = Bool(v, s.Topmost);
                 if (map.TryGetValue("seconds", out v)) s.Seconds = Bool(v, s.Seconds);
                 if (map.TryGetValue("x", out v)) s.X = Num(v, s.X);
@@ -352,7 +362,29 @@ namespace DesktopClock {
             s.Tint = Clamp01(s.Tint);
             s.Edge = Clamp01(s.Edge);
             s.Corner = ClampCorner(s.Corner);
+            s.BgDim = Clamp(s.BgDim, 0, 0.80);
+            s.BgBlur = Clamp(s.BgBlur, 0, 30);
             return s;
+        }
+
+        // 缩放模式取值归一化，非法值回退 fill
+        static string NormFit(string v) {
+            if (v == "fit" || v == "stretch" || v == "tile" || v == "fill") return v;
+            return "fill";
+        }
+
+        // 双参 clamp（C# 5：普通静态方法即可）
+        static double Clamp(double v, double lo, double hi) {
+            if (double.IsNaN(v)) return lo;
+            if (v < lo) return lo;
+            if (v > hi) return hi;
+            return v;
+        }
+
+        // JSON 字符串转义：**先转反斜杠再转引号**（Windows 路径必需，否则 C:\a 会破坏解析）
+        static string Esc(string s) {
+            if (s == null) return "";
+            return s.Replace("\\", "\\\\").Replace("\"", "\\\"");
         }
 
         public void Save() {
@@ -366,7 +398,15 @@ namespace DesktopClock {
                 sb.Append("  // 圆角半径（像素，0 = 方角，50 较圆润，150 = 半圆）\n");
                 sb.Append("  \"corner\": ").Append(F(Corner)).Append(",\n");
                 sb.Append("  // 天气城市（留空 = 自动 IP 定位，可手动指定如 Beijing / Shanghai）\n");
-                sb.Append("  \"city\": ").Append(City == null ? "\"\"" : "\"" + City.Replace("\"", "\\\"") + "\"").Append(",\n");
+                sb.Append("  \"city\": \"").Append(Esc(City)).Append("\",\n");
+                sb.Append("  // v1.7 背景图片路径（留空 = 使用渐变背景；拖图片到窗口或右键菜单选择）\n");
+                sb.Append("  \"bgImage\": \"").Append(Esc(BgImage)).Append("\",\n");
+                sb.Append("  // 背景图缩放模式：fill 填充裁剪 / fit 适应留边 / stretch 拉伸 / tile 平铺\n");
+                sb.Append("  \"bgFit\": \"").Append(NormFit(BgFit)).Append("\",\n");
+                sb.Append("  // 背景图暗化遮罩强度（0.0 ~ 0.80，越大时间文字越清晰）\n");
+                sb.Append("  \"bgDim\": ").Append(F(BgDim)).Append(",\n");
+                sb.Append("  // 背景图模糊半径（0 ~ 30 像素，0 = 不模糊）\n");
+                sb.Append("  \"bgBlur\": ").Append(F(BgBlur)).Append(",\n");
                 sb.Append("  // 窗口置顶（始终在最上层）\n");
                 sb.Append("  \"topmost\": ").Append(Topmost ? "true" : "false").Append(",\n");
                 sb.Append("  // 显示秒\n");
@@ -481,6 +521,13 @@ namespace DesktopClock {
         Path edgePath;
         Settings cfg;
         MenuItem cityInfoItem;   // 右键菜单里的"天气城市"状态行（打开菜单时刷新文本）
+        // v1.7 背景图片相关图层引用（用于运行时切换/调参）
+        Rectangle bgImageRect;   // 图片层（ImageBrush 填充）
+        Rectangle bgDimRect;     // 暗化遮罩层
+        Rectangle bgFrostRect;   // 磨砂颗粒层（图片模式下降低不透明度）
+        Polygon bgPurpleTri, bgCyanTri;   // 渐变两片三角形
+        Rectangle bgBandRect;    // 斜向高光带
+        MenuItem[] fitItems;     // 缩放模式子菜单项（刷新勾选状态用）
 
         public MainWindow() {
             Title = "clock";
@@ -503,6 +550,9 @@ namespace DesktopClock {
             ContextMenu = BuildMenu();
             Closing += delegate { SavePosition(); };
 
+            // v1.7：直接把图片拖到时钟上即可设为背景
+            EnableImageDrop();
+
             var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             timer.Tick += delegate { UpdateClock(); };
             timer.Start();
@@ -523,8 +573,7 @@ namespace DesktopClock {
         // 改完 city 立即生效，无需重启程序
         void FetchWeather() {
             bool autoLocate = string.IsNullOrEmpty(cfg.City);
-            string url = autoLocate ? "https://wttr.in/?format=j1"
-                : ("https://wttr.in/" + System.Uri.EscapeDataString(cfg.City) + "?format=j1");
+            string url = autoLocate ? "https://wttr.in/?format=j1" : ("https://wttr.in/" + System.Uri.EscapeDataString(cfg.City) + "?format=j1");
             string cityName = autoLocate ? null : cfg.City;   // 手动指定则直接用它做显示名
             Weather.FetchAsync(delegate { Dispatcher.BeginInvoke(new Action(UpdateWeather)); }, url, cityName);
         }
@@ -756,6 +805,7 @@ namespace DesktopClock {
         }
 
         // v1.4 背景：霓虹紫青对角分层 + 斜向高光分隔带 + 磨砂/亚克力颗粒。
+        // v1.7 新增背景图片层（置底）与暗化遮罩层（图片之上，保证时间文字可读）。
         // 顶层 Canvas 用 squircle 几何做裁剪（圆角面板），整体透明度由 bgLayer.Opacity 控制。
         FrameworkElement BuildBackground(double w, double h, double r) {
             var canvas = new Canvas {
@@ -765,13 +815,24 @@ namespace DesktopClock {
                 IsHitTestVisible = false
             };
 
+            // ---- v1.7 图片层（置底）。外扩 pad 是为模糊留出出血区，
+            //      避免 BlurEffect 在边缘采样到透明而出现发虚的白边
+            double pad = 40;
+            bgImageRect = new Rectangle {
+                Width = w + pad * 2,
+                Height = h + pad * 2,
+                Visibility = Visibility.Collapsed
+            };
+            Canvas.SetLeft(bgImageRect, -pad);
+            Canvas.SetTop(bgImageRect, -pad);
+
             // 左上→右下方向：霓虹紫渐变（左上亮紫，向右下渐深）
             var purple = new LinearGradientBrush(
                 Color.FromRgb(0x9A, 0x3B, 0xF7),
                 Color.FromRgb(0x1B, 0x0A, 0x3A),
                 new Point(0, 0), new Point(1, 1));
             purple.GradientStops.Insert(1, new GradientStop(Color.FromRgb(0x5E, 0x1A, 0xA8), 0.55));
-            var purpleTri = new Polygon {
+            bgPurpleTri = new Polygon {
                 Points = new PointCollection { new Point(0, 0), new Point(0, h), new Point(w, 0) },
                 Fill = purple
             };
@@ -782,7 +843,7 @@ namespace DesktopClock {
                 Color.FromRgb(0x00, 0xE5, 0xFF),
                 new Point(0, 0), new Point(1, 1));
             cyan.GradientStops.Insert(1, new GradientStop(Color.FromRgb(0x00, 0x9C, 0xC8), 0.55));
-            var cyanTri = new Polygon {
+            bgCyanTri = new Polygon {
                 Points = new PointCollection { new Point(0, h), new Point(w, 0), new Point(w, h) },
                 Fill = cyan
             };
@@ -802,19 +863,28 @@ namespace DesktopClock {
                     new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 1)
                 }
             };
-            var band = new Rectangle { Width = w, Height = h, Fill = bandBrush };
+            bgBandRect = new Rectangle { Width = w, Height = h, Fill = bandBrush };
+
+            // 暗化遮罩（图片之上）：纯黑半透明，强度由 bgDim 控制
+            bgDimRect = new Rectangle {
+                Width = w, Height = h,
+                Fill = new SolidColorBrush(Colors.Black),
+                Visibility = Visibility.Collapsed
+            };
 
             // 磨砂 / 亚克力颗粒层（运行时生成细颗粒位图）
-            var frost = new Rectangle {
+            bgFrostRect = new Rectangle {
                 Width = w, Height = h,
                 Fill = MakeFrostBrush((int)(w / 5), (int)(h / 5)),
                 Opacity = 0.28
             };
 
-            canvas.Children.Add(purpleTri);
-            canvas.Children.Add(cyanTri);
-            canvas.Children.Add(band);
-            canvas.Children.Add(frost);
+            canvas.Children.Add(bgImageRect);   // 1 图片（最底）
+            canvas.Children.Add(bgPurpleTri);   // 2 渐变
+            canvas.Children.Add(bgCyanTri);     // 3 渐变
+            canvas.Children.Add(bgBandRect);    // 4 高光带
+            canvas.Children.Add(bgDimRect);     // 5 暗化遮罩（盖在图片上）
+            canvas.Children.Add(bgFrostRect);   // 6 磨砂颗粒（最上）
             return canvas;
         }
 
@@ -847,6 +917,117 @@ namespace DesktopClock {
         // 文字（时间/日期/关闭按钮）在背景之上不受影响，保持清晰。
         void ApplyBackground() {
             bgLayer.Opacity = cfg.Tint;
+            ApplyBackgroundImage();
+        }
+
+        // ---------------------------------------------------------- v1.7 背景图片
+        // 按当前配置刷新背景图相关图层。无图/图片读取失败时自动回退渐变背景（不报错）
+        void ApplyBackgroundImage() {
+            bool has = !string.IsNullOrEmpty(cfg.BgImage) && File.Exists(cfg.BgImage);
+            BitmapImage bmp = null;
+            if (has) {
+                try {
+                    // DecodePixelWidth 降采样到 2 倍窗宽：4K 大图也不吃内存、不卡顿
+                    bmp = LoadBitmap(cfg.BgImage, (int)Math.Round(Width * 2));
+                } catch { bmp = null; }
+            }
+            bool ok = bmp != null;
+
+            // 图片层
+            if (ok) {
+                // 模糊时向四周外扩（给 BlurEffect 留出血区，避免边缘发虚露底）；
+                // 不模糊时严格贴合窗口，保证"填充裁剪"的取景不被多裁
+                double pad = cfg.BgBlur > 0.5 ? 40 : 0;
+                bgImageRect.Width = Width + pad * 2;
+                bgImageRect.Height = Height + pad * 2;
+                Canvas.SetLeft(bgImageRect, -pad);
+                Canvas.SetTop(bgImageRect, -pad);
+
+                var brush = new ImageBrush(bmp) {
+                    AlignmentX = AlignmentX.Center,
+                    AlignmentY = AlignmentY.Center
+                };
+                ApplyFit(brush, cfg.BgFit, bmp);
+                brush.Freeze();
+                bgImageRect.Fill = brush;
+                bgImageRect.Visibility = Visibility.Visible;
+                // 模糊：图片模式下才生效（RenderingBias.Performance 换帧率）
+                bgImageRect.Effect = cfg.BgBlur > 0.5
+                    ? new BlurEffect { Radius = cfg.BgBlur, RenderingBias = RenderingBias.Performance }
+                    : null;
+            } else {
+                bgImageRect.Fill = null;
+                bgImageRect.Effect = null;
+                bgImageRect.Visibility = Visibility.Collapsed;
+            }
+
+            // 暗化遮罩
+            bgDimRect.Opacity = cfg.BgDim;
+            bgDimRect.Visibility = (ok && cfg.BgDim > 0.01) ? Visibility.Visible : Visibility.Collapsed;
+
+            // 渐变三件套：有图时隐藏（图片替代渐变），无图时显示
+            var gv = ok ? Visibility.Collapsed : Visibility.Visible;
+            bgPurpleTri.Visibility = gv;
+            bgCyanTri.Visibility = gv;
+            bgBandRect.Visibility = gv;
+
+            // 磨砂颗粒：图片模式下减半，只留一点质感
+            bgFrostRect.Opacity = ok ? 0.12 : 0.28;
+        }
+
+        // 按文件名后缀判断是否为支持展示的图片（防呆：拖入文件夹/压缩包时静默忽略）
+        static bool IsImageFile(string path) {
+            if (string.IsNullOrEmpty(path)) return false;
+            string ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+            return ext == ".jpg" || ext == ".jpeg" || ext == ".png" ||
+                   ext == ".bmp" || ext == ".gif" || ext == ".webp";
+        }
+
+        // 加载位图：OnLoad 立刻读完并释放文件句柄（之后图片可被移动/删除）
+        static BitmapImage LoadBitmap(string path, int decodeWidth) {
+            var bmp = new BitmapImage();
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad;
+            bmp.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
+            if (decodeWidth > 0) bmp.DecodePixelWidth = decodeWidth;
+            bmp.UriSource = new Uri(path, UriKind.Absolute);
+            bmp.EndInit();
+            bmp.Freeze();
+            return bmp;
+        }
+
+        // 四种缩放模式映射到 ImageBrush
+        static void ApplyFit(ImageBrush b, string fit, BitmapImage src) {
+            string f = (fit == null) ? "fill" : fit;
+            if (f == "fit") {
+                b.Stretch = Stretch.Uniform;          // 适应：完整显示，可能留边
+            } else if (f == "stretch") {
+                b.Stretch = Stretch.Fill;             // 拉伸：铺满，可能变形
+            } else if (f == "tile") {
+                // 平铺：按原始像素尺寸重复，视口高度按图片宽高比折算
+                double tw = Math.Min(360, Math.Max(120, src.PixelWidth));
+                double ratio = src.PixelWidth > 0 ? ((double)src.PixelHeight / src.PixelWidth) : 0.6;
+                b.Viewport = new Rect(0, 0, tw, Math.Max(20, tw * ratio));
+                b.ViewportUnits = BrushMappingMode.Absolute;
+                b.Stretch = Stretch.None;
+                b.TileMode = TileMode.Tile;
+            } else {
+                b.Stretch = Stretch.UniformToFill;    // 填充裁剪（默认）
+            }
+        }
+
+        // 设置 / 清除背景图（拖拽与菜单共用），并落盘
+        void SetBgImage(string path) {
+            if (!IsImageFile(path) || !File.Exists(path)) return;
+            cfg.BgImage = path;
+            cfg.Save();
+            ApplyBackgroundImage();
+        }
+
+        void ClearBgImage() {
+            cfg.BgImage = "";
+            cfg.Save();
+            ApplyBackgroundImage();
         }
 
         void ApplyEdge() {
@@ -912,6 +1093,65 @@ namespace DesktopClock {
             var exitItem = new MenuItem { Header = "退出" };
             exitItem.Click += delegate { Close(); };
 
+            // ---- v1.7 背景图片 ----
+            var chooseBgItem = new MenuItem { Header = "选择背景图片…" };
+            chooseBgItem.Click += delegate {
+                var dlg = new Microsoft.Win32.OpenFileDialog {
+                    Title = "选择背景图片",
+                    Filter = "图片文件|*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.webp|所有文件|*.*"
+                };
+                if (dlg.ShowDialog() == true) SetBgImage(dlg.FileName);
+            };
+            var clearBgItem = new MenuItem { Header = "清除背景图片（回到渐变）" };
+            clearBgItem.Click += delegate { ClearBgImage(); };
+
+            // 缩放模式子菜单（互斥勾选）
+            var fitMenu = new MenuItem { Header = "缩放模式" };
+            string[][] fitDefs = new string[][] {
+                new string[] { "fill", "填充裁剪（推荐）" },
+                new string[] { "fit", "适应留边" },
+                new string[] { "stretch", "拉伸铺满" },
+                new string[] { "tile", "平铺" }
+            };
+            fitItems = new MenuItem[fitDefs.Length];
+            for (int i = 0; i < fitDefs.Length; i++) {
+                string key = fitDefs[i][0];
+                var mi = new MenuItem {
+                    Header = fitDefs[i][1],
+                    IsCheckable = true,
+                    IsChecked = (NormFitKey(cfg.BgFit) == key)
+                };
+                mi.Click += delegate {
+                    cfg.BgFit = key;
+                    cfg.Save();
+                    ApplyBackgroundImage();
+                    RefreshFitChecks();
+                };
+                fitItems[i] = mi;
+                fitMenu.Items.Add(mi);
+            }
+
+            var dimItem = new MenuItem { StaysOpenOnClick = true };
+            dimItem.Header = MakeSlider("背景暗化", cfg.BgDim, 0.0, 0.80, delegate(double v) {
+                cfg.BgDim = v;
+                ApplyBackgroundImage();
+            });
+
+            var blurItem = new MenuItem { StaysOpenOnClick = true };
+            blurItem.Header = MakeSlider("背景模糊", cfg.BgBlur, 0.0, 30.0, delegate(double v) {
+                cfg.BgBlur = v;
+                ApplyBackgroundImage();
+            });
+
+            var bgInfoItem = new MenuItem {
+                Header = "背景图片",
+                IsEnabled = false
+            };
+            var bgTipItem = new MenuItem {
+                Header = "提示：可直接把图片拖到时钟上",
+                IsEnabled = false
+            };
+
             // ---- 天气城市：菜单直接改，不用手编 settings.json ----
             cityInfoItem = new MenuItem {
                 Header = "天气城市",
@@ -939,6 +1179,12 @@ namespace DesktopClock {
             cm.Opened += delegate {
                 cityInfoItem.Header = "天气城市: " +
                     (string.IsNullOrEmpty(cfg.City) ? "自动定位 (IP)" : cfg.City);
+                // 背景图状态行：显示文件名（太长则截断）
+                string bgName = string.IsNullOrEmpty(cfg.BgImage)
+                    ? "渐变背景" : System.IO.Path.GetFileName(cfg.BgImage);
+                if (bgName.Length > 22) bgName = bgName.Substring(0, 21) + "…";
+                bgInfoItem.Header = "背景图片: " + bgName;
+                RefreshFitChecks();
             };
 
             cm.Closed += delegate { cfg.Save(); };
@@ -950,12 +1196,61 @@ namespace DesktopClock {
             cm.Items.Add(topItem);
             cm.Items.Add(secItem);
             cm.Items.Add(new Separator());
+            cm.Items.Add(bgInfoItem);
+            cm.Items.Add(chooseBgItem);
+            cm.Items.Add(clearBgItem);
+            cm.Items.Add(fitMenu);
+            cm.Items.Add(dimItem);
+            cm.Items.Add(blurItem);
+            cm.Items.Add(bgTipItem);
+            cm.Items.Add(new Separator());
             cm.Items.Add(cityInfoItem);
             cm.Items.Add(setCityItem);
             cm.Items.Add(autoCityItem);
             cm.Items.Add(new Separator());
             cm.Items.Add(exitItem);
             return cm;
+        }
+
+        // 缩放模式取值归一化（与 Settings.NormFit 同规则）
+        static string NormFitKey(string v) {
+            if (v == "fit" || v == "stretch" || v == "tile" || v == "fill") return v;
+            return "fill";
+        }
+
+        // 拖拽图片到窗口设为背景（宽松判定：只认图片扩展名，其余静默忽略）
+        void EnableImageDrop() {
+            AllowDrop = true;
+            DragOver += delegate(object s, DragEventArgs e) {
+                string p = DropImagePath(e);
+                e.Effects = (p != null) ? DragDropEffects.Copy : DragDropEffects.None;
+                e.Handled = true;
+            };
+            Drop += delegate(object s, DragEventArgs e) {
+                string p = DropImagePath(e);
+                if (p != null) SetBgImage(p);
+                e.Handled = true;
+            };
+        }
+
+        // 从拖拽数据里取第一个图片文件路径；不是图片则返回 null
+        static string DropImagePath(DragEventArgs e) {
+            if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return null;
+            var files = e.Data.GetData(DataFormats.FileDrop) as string[];
+            if (files == null || files.Length == 0) return null;
+            for (int i = 0; i < files.Length; i++) {
+                if (IsImageFile(files[i])) return files[i];
+            }
+            return null;
+        }
+
+        // 刷新缩放模式子菜单的勾选状态
+        void RefreshFitChecks() {
+            if (fitItems == null) return;
+            string[] keys = new string[] { "fill", "fit", "stretch", "tile" };
+            for (int i = 0; i < fitItems.Length && i < keys.Length; i++) {
+                fitItems[i].IsChecked = (NormFitKey(cfg.BgFit) == keys[i]);
+            }
         }
 
         // 城市输入对话框（纯代码 WPF 窗口，无 XAML）。确定返回 true，result 带出输入值
