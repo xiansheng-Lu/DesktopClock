@@ -332,6 +332,9 @@ namespace DesktopClock {
         public bool Seconds = true;
         public double X = double.NaN;     // 窗口位置
         public double Y = double.NaN;
+        // v1.10 倒计时彩蛋
+        public double TargetHour = double.NaN;   // 目标小时（NaN=未设置）
+        public double TargetMinute = double.NaN; // 目标分钟
 
         static string FilePath {
             get {
@@ -521,12 +524,15 @@ namespace DesktopClock {
     // ------------------------------------------------------------ 主窗口
     public class MainWindow : Window {
         TextBlock hhText, mmText, ssText, dateText, colon2, weatherText;
+        TextBlock countdownText;   // v1.10 倒计时显示
         FrameworkElement bgLayer;
         Path edgePath;
         Settings cfg;
         MenuItem cityInfoItem;   // 右键菜单里的"天气城市"状态行（打开菜单时刷新文本）
         MenuItem setCityItem, autoCityItem;          // 依赖天气开关的菜单项（关闭时置灰）
         DispatcherTimer weatherTimer;                // 天气定时刷新（随开关启停）
+        DispatcherTimer countdownTimer;              // v1.10 倒计时检测（每秒检查）
+        bool countdownTriggered = false;             // v1.10 是否已触发过倒计时提示
         // v1.7 背景图片相关图层引用（用于运行时切换/调参）
         Rectangle bgImageRect;   // 图片层（ImageBrush 填充）
         Rectangle bgDimRect;     // 暗化遮罩层
@@ -598,6 +604,63 @@ namespace DesktopClock {
 
         void UpdateWeather() {
             weatherText.Text = Weather.ComposeLine();
+        }
+
+        // v1.10 倒计时检测
+        void CheckCountdown() {
+            if (double.IsNaN(cfg.TargetHour) || double.IsNaN(cfg.TargetMinute)) return;
+            var now = DateTime.Now;
+            if (now.Hour == (int)cfg.TargetHour && now.Minute == (int)cfg.TargetMinute) {
+                if (!countdownTriggered) {
+                    countdownTriggered = true;
+                    OnCountdownReached();
+                }
+            } else {
+                countdownTriggered = false;
+            }
+        }
+
+        void OnCountdownReached() {
+            // 窗口抖动效果（通过快速移动位置模拟）
+            var origX = Left;
+            var origY = Top;
+            for (int i = 0; i < 6; i++) {
+                Left = origX + ((i % 2 == 0) ? 5 : -5);
+                Top = origY + ((i % 2 == 0) ? 3 : -3);
+                System.Threading.Thread.Sleep(50);
+            }
+            Left = origX;
+            Top = origY;
+            // 播放系统提示音
+            try { System.Media.SystemSounds.Exclamation.Play(); } catch { }
+            // 弹窗通知
+            MessageBox.Show("到时间了！目标时间已到。", "倒计时提醒",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        // v1.10 更新倒计时显示
+        void UpdateCountdown() {
+            if (countdownText == null) return;
+            if (double.IsNaN(cfg.TargetHour) || double.IsNaN(cfg.TargetMinute)) {
+                countdownText.Visibility = Visibility.Collapsed;
+                countdownTimer.Stop();
+                return;
+            }
+            countdownText.Visibility = Visibility.Visible;
+            var now = DateTime.Now;
+            var target = new DateTime(now.Year, now.Month, now.Day,
+                (int)cfg.TargetHour, (int)cfg.TargetMinute, 0);
+            if (target < now) target = target.AddDays(1);
+            var remaining = target - now;
+            if (remaining.TotalHours >= 1) {
+                countdownText.Text = string.Format("距离 {0}:{1} 还有 {2}h{3}m",
+                    Pad((int)cfg.TargetHour), Pad((int)cfg.TargetMinute),
+                    (int)remaining.TotalHours, Pad((int)remaining.Minutes));
+            } else {
+                countdownText.Text = string.Format("距离 {0}:{1} 还有 {2}m",
+                    Pad((int)cfg.TargetHour), Pad((int)cfg.TargetMinute),
+                    Pad((int)remaining.Minutes));
+            }
         }
 
         // 监视 settings.json：编辑器保存时实时生效（重载到内存并重绘）
@@ -1228,6 +1291,12 @@ namespace DesktopClock {
                 weatherToggleItem.IsChecked = cfg.ShowWeather;
                 setCityItem.IsEnabled = cfg.ShowWeather;
                 autoCityItem.IsEnabled = cfg.ShowWeather;
+                // v1.10 倒计时状态
+                if (!double.IsNaN(cfg.TargetHour) && !double.IsNaN(cfg.TargetMinute)) {
+                    countdownItem.Header = "设倒计时 (" + Pad((int)cfg.TargetHour) + ":" + Pad((int)cfg.TargetMinute) + ")";
+                } else {
+                    countdownItem.Header = "设倒计时...";
+                }
             };
 
             cm.Closed += delegate { cfg.Save(); };
@@ -1248,6 +1317,8 @@ namespace DesktopClock {
             cm.Items.Add(bgTipItem);
             cm.Items.Add(new Separator());
             cm.Items.Add(weatherToggleItem);
+            cm.Items.Add(countdownItem);
+            cm.Items.Add(clearCountdownItem);
             cm.Items.Add(cityInfoItem);
             cm.Items.Add(setCityItem);
             cm.Items.Add(autoCityItem);
@@ -1394,6 +1465,66 @@ namespace DesktopClock {
 
         static string Label(string label, double v) {
             return label + "  " + v.ToString("0.00", CultureInfo.InvariantCulture);
+        }
+
+        // v1.10 倒计时时间输入对话框
+        bool PromptCountdown(double hour, double minute, out string result) {
+            result = "";
+            var win = new Window {
+                Title = "设置倒计时",
+                Width = 380,
+                SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                WindowStyle = WindowStyle.ToolWindow,
+                ResizeMode = ResizeMode.NoResize,
+                Topmost = true,
+                Owner = this,
+                Background = new SolidColorBrush(Color.FromArgb(0xF2, 0x1B, 0x1E, 0x30))
+            };
+            var panel = new StackPanel { Margin = new Thickness(16) };
+
+            var tip = new TextBlock {
+                Text = "输入目标时间（小时 分钟），如：18 00 表示 18:00 下班",
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = new SolidColorBrush(Color.FromRgb(0xA8, 0xB4, 0xC8)),
+                Margin = new Thickness(0, 0, 0, 10),
+                FontSize = 12
+            };
+
+            var inputPanel = new StackPanel { Orientation = Orientation.Horizontal };
+            var hourBox = new TextBox {
+                Width = 60, Text = ((int)hour).ToString(),
+                FontSize = 14, Padding = new Thickness(6, 5, 6, 5),
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+            var sep = new TextBlock { Text = ":", FontSize = 14, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
+            var minBox = new TextBox {
+                Width = 60, Text = ((int)minute).ToString(),
+                FontSize = 14, Padding = new Thickness(6, 5, 6, 5)
+            };
+            inputPanel.Children.Add(hourBox);
+            inputPanel.Children.Add(sep);
+            inputPanel.Children.Add(minBox);
+
+            var btnPanel = new StackPanel {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 12, 0, 0)
+            };
+            var okBtn = new Button { Content = "确定", Width = 80, Height = 32, Margin = new Thickness(0, 0, 8, 0) };
+            var cancelBtn = new Button { Content = "取消", Width = 80, Height = 32 };
+            okBtn.Click += delegate {
+                result = hourBox.Text + " " + minBox.Text;
+                win.DialogResult = true;
+            };
+            cancelBtn.Click += delegate { win.DialogResult = false; };
+            btnPanel.Children.Add(okBtn);
+            btnPanel.Children.Add(cancelBtn);
+            panel.Children.Add(tip);
+            panel.Children.Add(inputPanel);
+            panel.Children.Add(btnPanel);
+            win.Content = panel;
+            return win.ShowDialog() == true;
         }
 
         // ============================================================ 位置记忆
