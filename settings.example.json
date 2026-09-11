@@ -24,5 +24,10 @@
   "seconds": true,
   // 窗口位置（首次启动自动记忆，可留默认）
   "x": null,
-  "y": null
+  "y": null,
+  // v1.10 倒计时彩蛋配置
+  // 目标小时（0-23，null=未设置）
+  "targetHour": null,
+  // 目标分钟（0-59）
+  "targetMinute": null
 }
